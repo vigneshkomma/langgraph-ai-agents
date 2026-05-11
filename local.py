@@ -70,7 +70,11 @@ def agent_node(state:AgentState, llm) -> AgentState:
 
 
     system_prompt = SystemMessage(content="""
-    You are a helpful assistant with web search capabilities
+    You are a helpful assistant with web search capabilities.
+    CRITICAL RULES:
+    1. BEFORE using a tool, check if the information is already in your chat history.
+    2. DO NOT search for information regarding our current or previous conversation. You have access to the history directly.
+    3. Use the search tool ONLY for factual, real-time, or external information that is not present in the chat history.
     """)
 
     response = llm.invoke([system_prompt] + state["messages"])
