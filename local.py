@@ -1,71 +1,69 @@
 import requests
 from typing import TypedDict, Annotated, List
 from langgraph.graph import StateGraph, START, END
-from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
+from langchain_core.tools import tool
 
-#state graph
+
+
+# 1. Define the tool 
+@tool
+def searxng_search(query:str):
+
+    """
+    Search the web for current events, news, or real-time information.
+    Use this whenever the user asks a question about the outside world.
+    """
+
+    url = "http://localhost:8080/search"
+    params = {"q":query,"format":"json"}
+
+    try:
+        res = requests.get(url,params=params)
+        data = res.json()
+        results = []
+        for r in data.get("results",[])[:5]:
+            results.append(f"{r['title']} - {r['url']}")
+        return "\n".join(results)
+    except Exception as e:
+        return f"Search failed:{str(e)}"
+    
+
+# 2. State Defination
 class AgentState(TypedDict):
     messages: List[BaseMessage]
     next: str
 
 
-#tool
-
-def searxng_search(query:str):
-    url = "http://localhost:8080/search"
-    params = {"q":query,"format":"json"}
-
-    res = requests.get(url, params=params)
-
-    data = res.json()
-
-    results = []
-    for r in data.get("results",[])[:5]:
-        results.append(f"{r['title']} - {r['url']}")
-    
-    return "\n".join(results)
-
-#tool node
+# 3. Tool Node
 def tool_node(state: AgentState) -> AgentState:
-    last_msg = state["messages"][-1].content
+    last_msg = state["messages"][-1]
 
-    query = last_msg.replace("search:","").strip()
+    if hasattr(last_msg,'tool_calls'):
+        for tool_call in last_msg.tool_calls:
+            content = searxng_search.invoke(tool_call["args"])
 
-    search_result = searxng_search(query)
+            result_msg = ToolMessage(content=content,tool_call_id=tool_call["id"])
 
-    state["messages"].append(AIMessage(content=f"search results:\n{search_result}"))
-
+            state["messages"].append(result_msg)
+    
     return state
 
 
-#agent node
+# 4. Agent Node
 def agent_node(state:AgentState, llm) -> AgentState:
 
     system_prompt = SystemMessage(content="""
-    You are an AI agent with access to a web search tool.
-
-    IMPORTANT RULES:
-    - If the question requires current, recent, or real-time information, you MUST use the search tool.
-    - Do NOT say you lack access to real-time data.
-    - Instead, call the tool.
-
-    To use the tool, respond EXACTLY like this:
-    search: <your query>
-
-    Examples:
-    User: Who won the latest F1 race?
-    You: search: latest F1 race winner
-
-    If you already have enough information, answer normally.
+    You are a helpful assistant with web search capabilities
     """)
+
     messages = [system_prompt] + state["messages"]  
     response = llm.invoke(messages)
     state["messages"].append(response)
 
-    text = response.content.lower()
 
-    if text.startswith("search:"):
+    if response.tool_calls:
         state["next"] = "tool"
     else:
         state["next"] = "end"
@@ -85,7 +83,6 @@ def build_graph(llm):
     graph.add_node("tool",tool_node)
 
     graph.add_edge(START,"agent")
-
     graph.add_conditional_edges(
         "agent",
         route,
@@ -101,11 +98,13 @@ def build_graph(llm):
 
 
 def main():
+
+    llm = ChatOllama(model='llama3.1:latest',temperature=0)
+
+    llm_with_tools = llm.bind_tools([searxng_search])
+
+    app = build_graph(llm_with_tools)
     state = {"messages":[]}
-
-    llm = ChatOllama(model='llama3:8b',temperature=0)
-
-    app = build_graph(llm)
 
     print("Chat has begin, enter 'exit' to stop\n")
 
@@ -119,8 +118,10 @@ def main():
 
         state = app.invoke(state)
 
-        print('Agent: ',state["messages"][-1].content,"\n")
+        final_response = state["messages"][-1].content
+        print(f"Agent: {final_response}\n")
 
 
-main()
+if __name__ == "__main__":
+    main()
 
