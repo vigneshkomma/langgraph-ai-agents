@@ -47,7 +47,7 @@ def searxng_search(query: str):
             formatted_result.append(f"Title: {title}\nURL: {link}\nSnippet: {clean_snippet}\n")
 
         #Add infobox data if available
-        infoboxes = data.get("infoboxed",[])
+        infoboxes = data.get("infoboxes",[])
         if infoboxes:
             info = infoboxes[0].get("content","")
             if info:
