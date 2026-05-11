@@ -1,15 +1,22 @@
 import requests
 from typing import TypedDict, Annotated, List
-from langgraph.graph import StateGraph, START, END
-from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
 from langchain_core.tools import tool
+from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langgraph.graph import StateGraph, START, END
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.graph.message import add_messages
 
+# 1. State Defination
+class AgentState(TypedDict):
+    messages: Annotated[List[BaseMessage],add_messages]
+    user_info: dict
+    iteration_count: int
+    is_authorised: bool
 
-
-# 1. Define the tool 
+# 2. Define the tool 
 @tool
-def searxng_search(query:str):
+def searxng_search(query: str):
 
     """
     Search the web for current events, news, or real-time information.
@@ -20,91 +27,84 @@ def searxng_search(query:str):
     params = {"q":query,"format":"json"}
 
     try:
-        res = requests.get(url,params=params)
+        res = requests.get(url,params = params, timeout = 10)
+        res.raise_for_status()
         data = res.json()
-        results = []
-        for r in data.get("results",[])[:5]:
-            results.append(f"{r['title']} - {r['url']}")
-        return "\n".join(results)
+
+        formatted_result = []
+
+        #Grab the top 5 results
+        raw_resluts = data.get("results",[])[:5]
+
+        for r in raw_resluts:
+            title = r.get("title","No title")
+            link = r.get("url","No URL")
+
+            snippet = r.get("content","No Description available.")
+
+            clean_snippet = (snippet[:200]+'...') if len(snippet) > 200 else snippet
+
+            formatted_result.append(f"Title: {title}\nURL: {link}\nSnippet: {clean_snippet}\n")
+
+        #Add infobox data if available
+        infoboxes = data.get("infoboxed",[])
+        if infoboxes:
+            info = infoboxes[0].get("content","")
+            if info:
+                formatted_result.insert(0,f"SUMMARY INFO: {info}\n---")
+
+        if not formatted_result:
+            return "No Relavent Search Results Found"
+
+        return "\n".join(formatted_result)
+
     except Exception as e:
         return f"Search failed:{str(e)}"
     
-
-# 2. State Defination
-class AgentState(TypedDict):
-    messages: List[BaseMessage]
-    next: str
-
-
-# 3. Tool Node
-def tool_node(state: AgentState) -> AgentState:
-    last_msg = state["messages"][-1]
-
-    if hasattr(last_msg,'tool_calls'):
-        for tool_call in last_msg.tool_calls:
-            content = searxng_search.invoke(tool_call["args"])
-
-            result_msg = ToolMessage(content=content,tool_call_id=tool_call["id"])
-
-            state["messages"].append(result_msg)
-    
-    return state
 
 
 # 4. Agent Node
 def agent_node(state:AgentState, llm) -> AgentState:
 
+    print(f"--- processing for user: {state['user_info'].get('name')}---")
+
+
     system_prompt = SystemMessage(content="""
     You are a helpful assistant with web search capabilities
     """)
 
-    messages = [system_prompt] + state["messages"]  
-    response = llm.invoke(messages)
-    state["messages"].append(response)
+    response = llm.invoke([system_prompt] + state["messages"])
 
+    return {
+        "messages":[response],
+        "iteration_count":state["iteration_count"] + 1
+    }
 
-    if response.tool_calls:
-        state["next"] = "tool"
-    else:
-        state["next"] = "end"
-
-    return state
-
-
-#router
-def route(state:AgentState):
-    return state["next"]
 
 #build graph
 def build_graph(llm):
-    graph = StateGraph(AgentState)
+    builder = StateGraph(AgentState)
 
-    graph.add_node("agent",lambda s:agent_node(s,llm))
-    graph.add_node("tool",tool_node)
+    builder.add_node("agent",lambda s: agent_node(s,llm))
+    builder.add_node("tools",ToolNode([searxng_search]))
 
-    graph.add_edge(START,"agent")
-    graph.add_conditional_edges(
-        "agent",
-        route,
-        {
-            "tool":"tool",
-            "end": END
-        }
-    )
+    builder.add_edge(START,"agent")
+    builder.add_conditional_edges("agent",tools_condition)
+    builder.add_edge("tools","agent")
 
-    graph.add_edge("tool","agent")
-
-    return graph.compile()
-
+    return builder.compile()
 
 def main():
 
-    llm = ChatOllama(model='llama3.1:latest',temperature=0)
+    llm = ChatOllama(model='llama3.1:latest',temperature=0).bind_tools([searxng_search])
+    app = build_graph(llm)
 
-    llm_with_tools = llm.bind_tools([searxng_search])
-
-    app = build_graph(llm_with_tools)
-    state = {"messages":[]}
+    current_state = {
+        "messages": [],
+        "user_info": {"name":"carry","tier":"local"},
+        "iteration_count": 0,
+        "is_authorised": True
+    }
 
     print("Chat has begin, enter 'exit' to stop\n")
 
@@ -114,13 +114,12 @@ def main():
         if user_input.lower() == 'exit':
             break
 
-        state["messages"].append(HumanMessage(content=user_input))
+        new_input = {"messages":[HumanMessage(content=user_input)]}
 
-        state = app.invoke(state)
+        current_state = app.invoke({**current_state,**new_input})
 
-        final_response = state["messages"][-1].content
-        print(f"Agent: {final_response}\n")
-
+        print(f"Agent: {current_state['messages'][-1].content}")
+        print(f"(Debug: Iteration #{current_state['iteration_count']})\n")
 
 if __name__ == "__main__":
     main()
