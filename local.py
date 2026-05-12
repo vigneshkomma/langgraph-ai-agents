@@ -6,7 +6,7 @@ from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, System
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.graph.message import add_messages
-#from IPython.display import Image, display
+#from IPython.display import Image, display #use it to display the node graph 
 
 # 1. State Defination
 class AgentState(TypedDict):
@@ -103,7 +103,7 @@ def main():
 
     llm = ChatOllama(model='llama3.1:latest',temperature=0).bind_tools([searxng_search])
     app = build_graph(llm)
-    #display(Image(app.get_graph().draw_mermaid_png()))
+    #display(Image(app.get_graph().draw_mermaid_png())) #use this line to print the node graph image
     current_state = {
         "messages": [],
         "user_info": {"name":"carry","tier":"local"},
